@@ -50,6 +50,16 @@ Decomposing the guidance delta in frequency space lets structure and detail be t
 
 ---
 
+
+## Tested environments
+
+- reForge (Python 3.10) — SDXL-family models
+- Forge Neo (Python 3.12) — including Anima, and txt2img + Hires.fix
+
+Not compatible with A1111 (`set_model_sampler_post_cfg_function` is Forge-backend only).
+
+---
+
 ---
 
 
@@ -102,6 +112,16 @@ output = uncond_denoised + scale × Δ̂
 
 低周波帯（≤ cutoff）を `l`、高周波帯（> cutoff）を `h` でスケーリングします。  
 ガイダンス差分を周波数領域で分解することで、構造とディテールを別々に調整できます。
+
+---
+
+
+## 動作確認環境
+
+- reForge（Python 3.10）— SDXL 系モデル
+- Forge Neo（Python 3.12）— Anima を含む。txt2img + Hires.fix も確認
+
+A1111 非対応（`set_model_sampler_post_cfg_function` は Forge バックエンド専用）。
 
 ---
 
