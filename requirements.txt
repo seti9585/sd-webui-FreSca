@@ -1,0 +1,3 @@
+# No additional requirements.
+# torch.fft (fft2 / ifft2 / fftshift / ifftshift) is available in PyTorch >= 1.7
+# and is already present in the reForge environment.
