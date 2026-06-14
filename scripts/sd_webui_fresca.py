@@ -8,7 +8,11 @@ Sort   : 15.2  (after CFG core, before MaHiRo 15.5)
 import gradio as gr
 import modules.scripts as scripts
 
-from sd_webui_fresca.core import apply_fresca
+from sd_webui_fresca.core import (
+    FRESCA_HOOK_QUALNAME,
+    apply_fresca,
+    remove_fresca_patches,
+)
 
 
 class FreScaScript(scripts.Script):
@@ -76,8 +80,11 @@ class FreScaScript(scripts.Script):
         def fresca_hook(args):
             return apply_fresca(args, scale_low=_l, scale_high=_h, freq_cutoff=_cut)
 
-        fresca_hook.__qualname__ = "fresca_hook"
+        fresca_hook.__qualname__ = FRESCA_HOOK_QUALNAME
 
         unet = p.sd_model.forge_objects.unet.clone()
+        # Fail-safe: drop any FreSca hook left by a previous run so the effect
+        # is applied exactly once, never stacked.
+        remove_fresca_patches(unet)
         unet.set_model_sampler_post_cfg_function(fresca_hook)
         p.sd_model.forge_objects.unet = unet

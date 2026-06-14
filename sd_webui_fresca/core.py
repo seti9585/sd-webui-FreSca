@@ -29,6 +29,41 @@ from __future__ import annotations
 import torch
 
 
+# Qualname tag used to identify this extension's own post-CFG hook so it can be
+# removed before re-registration (idempotency / fail-safe against double-apply).
+FRESCA_HOOK_QUALNAME = "fresca_hook"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Fail-safe: remove any previously registered FreSca hook
+# ─────────────────────────────────────────────────────────────────────────────
+
+def remove_fresca_patches(unet) -> None:
+    """Strip this extension's own post-CFG hook from *unet*, in place.
+
+    reForge / Forge store post-CFG functions in
+    ``unet.model_options["sampler_post_cfg_function"]`` (a list). Re-running
+    ``process`` (re-enable, parameter change, repeated batches) would otherwise
+    append a second ``fresca_hook`` and apply FreSca twice — over-scaling the
+    guidance delta. Calling this before registration keeps the operation
+    idempotent: at most one FreSca hook is ever present.
+
+    Only hooks whose ``__qualname__`` equals :data:`FRESCA_HOOK_QUALNAME` are
+    removed, so other extensions' post-CFG functions (e.g. MaHiRo) are left
+    untouched.
+    """
+    opts = getattr(unet, "model_options", None)
+    if not isinstance(opts, dict):
+        return
+    fns = opts.get("sampler_post_cfg_function")
+    if not fns:
+        return
+    opts["sampler_post_cfg_function"] = [
+        fn for fn in fns
+        if getattr(fn, "__qualname__", None) != FRESCA_HOOK_QUALNAME
+    ]
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Internal helper
 # ─────────────────────────────────────────────────────────────────────────────
