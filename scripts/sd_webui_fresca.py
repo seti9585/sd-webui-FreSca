@@ -30,6 +30,12 @@ class FreScaScript(scripts.Script):
     # ── Gradio UI ──────────────────────────────────────────────────────────
     def ui(self, is_img2img):
         with gr.Accordion(label="FreSca", open=False):
+            gr.HTML(
+                "<p><i>"
+                "<b>Post-CFG</b>: Scales the CFG guidance delta independently "
+                "in low-frequency and high-frequency bands via 2D FFT."
+                "</i></p>"
+            )
             enabled = gr.Checkbox(label="Enable FreSca", value=False)
             with gr.Row():
                 scale_low = gr.Slider(
