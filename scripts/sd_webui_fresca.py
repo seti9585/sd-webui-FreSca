@@ -20,22 +20,15 @@ class FreScaScript(scripts.Script):
 
     sorting_priority = 15.2
 
-    # ── Script metadata ────────────────────────────────────────────────────
     def title(self) -> str:
         return "FreSca"
 
     def show(self, is_img2img):
         return scripts.AlwaysVisible
 
-    # ── Gradio UI ──────────────────────────────────────────────────────────
     def ui(self, is_img2img):
         with gr.Accordion(label="FreSca", open=False):
-            gr.HTML(
-                "<p><i>"
-                "<b>Post-CFG</b>: Scales the CFG guidance delta independently "
-                "in low-frequency and high-frequency bands via 2D FFT."
-                "</i></p>"
-            )
+            gr.HTML("<p style='margin:4px 0 8px'>Post-CFG — frequency-domain guidance scaling</p>")
             enabled = gr.Checkbox(label="Enable FreSca", value=False)
             with gr.Row():
                 scale_low = gr.Slider(
@@ -67,21 +60,31 @@ class FreScaScript(scripts.Script):
             )
         return [enabled, scale_low, scale_high, freq_cutoff]
 
-    # ── Hook registration ──────────────────────────────────────────────────
-    def process(
-        self,
-        p,
-        enabled: bool,
-        scale_low: float,
-        scale_high: float,
-        freq_cutoff: int,
-    ):
+    def process(self, p, enabled, scale_low, scale_high, freq_cutoff):
+        # Write metadata once per generation (before sampling starts)
+        if not enabled:
+            return
+        p.extra_generation_params["fresca_enabled"]      = True
+        p.extra_generation_params["fresca_scale_low"]    = float(scale_low)
+        p.extra_generation_params["fresca_scale_high"]   = float(scale_high)
+        p.extra_generation_params["fresca_freq_cutoff"]  = int(freq_cutoff)
+
+    def process_before_every_sampling(self, p, *args, **kwargs):
+        # Hook registration runs here — at this point forge_objects.unet is
+        # the same object cfg_denoiser will reference during sampling.
+        if len(args) < 4:
+            return
+        enabled     = bool(args[0])
+        scale_low   = float(args[1])
+        scale_high  = float(args[2])
+        freq_cutoff = int(args[3])
+
         if not enabled:
             return
 
-        _l   = float(scale_low)
-        _h   = float(scale_high)
-        _cut = int(freq_cutoff)
+        _l   = scale_low
+        _h   = scale_high
+        _cut = freq_cutoff
 
         def fresca_hook(args):
             return apply_fresca(args, scale_low=_l, scale_high=_h, freq_cutoff=_cut)
@@ -89,8 +92,6 @@ class FreScaScript(scripts.Script):
         fresca_hook.__qualname__ = FRESCA_HOOK_QUALNAME
 
         unet = p.sd_model.forge_objects.unet.clone()
-        # Fail-safe: drop any FreSca hook left by a previous run so the effect
-        # is applied exactly once, never stacked.
         remove_fresca_patches(unet)
         unet.set_model_sampler_post_cfg_function(fresca_hook)
         p.sd_model.forge_objects.unet = unet
