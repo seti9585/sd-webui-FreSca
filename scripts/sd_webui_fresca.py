@@ -28,7 +28,13 @@ class FreScaScript(scripts.Script):
 
     def ui(self, is_img2img):
         with gr.Accordion(label="FreSca", open=False):
-            gr.HTML("<p style='margin:4px 0 8px'>Post-CFG — frequency-domain guidance scaling</p>")
+            gr.HTML(
+                "<p><i>"
+                "<b>Post-CFG</b>: Scales the CFG guidance delta independently "
+                "in low-frequency and high-frequency bands via 2D FFT. "
+                "Requires Forge backend."
+                "</i></p>"
+            )
             enabled = gr.Checkbox(label="Enable FreSca", value=False)
             with gr.Row():
                 scale_low = gr.Slider(
