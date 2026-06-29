@@ -28,13 +28,7 @@ class FreScaScript(scripts.Script):
 
     def ui(self, is_img2img):
         with gr.Accordion(label="FreSca", open=False):
-            gr.HTML(
-                "<p><i>"
-                "<b>Post-CFG</b>: Scales the CFG guidance delta independently "
-                "in low-frequency and high-frequency bands via 2D FFT. "
-                "Requires Forge backend."
-                "</i></p>"
-            )
+            gr.HTML("<p style='margin:4px 0 8px'>Post-CFG — frequency-domain guidance scaling</p>")
             enabled = gr.Checkbox(label="Enable FreSca", value=False)
             with gr.Row():
                 scale_low = gr.Slider(
@@ -64,10 +58,29 @@ class FreScaScript(scripts.Script):
                     "low and high bands. ComfyUI default = 20."
                 ),
             )
+
+        # Infotext round-trip (PNG Info -> Send to txt2img / img2img).
+        # Keys must match those written to p.extra_generation_params in process().
+        # The Enable checkbox uses a callable instead of a plain key string:
+        # infotext paste leaves a component untouched when its key is absent
+        # (Forge Neo -> gr.skip(), reForge -> gr.update() no-op), so a bare key
+        # could never turn FreSca OFF. The callable returns False on a missing
+        # key, forcing OFF when an image generated WITHOUT FreSca is sent,
+        # which is required for faithful same-seed reproduction.
+        self.infotext_fields = [
+            (enabled,     lambda d: d.get("fresca_enabled", "False") == "True"),
+            (scale_low,   "fresca_scale_low"),
+            (scale_high,  "fresca_scale_high"),
+            (freq_cutoff, "fresca_freq_cutoff"),
+        ]
+
         return [enabled, scale_low, scale_high, freq_cutoff]
 
     def process(self, p, enabled, scale_low, scale_high, freq_cutoff):
-        # Write metadata once per generation (before sampling starts)
+        # Write metadata once per generation (before sampling starts).
+        # Only written when enabled; absence is resolved to OFF on paste by the
+        # Enable callable registered in ui(), so no fresca_enabled: False is
+        # emitted for disabled runs (keeps infotext free of disabled-extension keys).
         if not enabled:
             return
         p.extra_generation_params["fresca_enabled"]      = True
