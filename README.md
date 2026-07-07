@@ -28,11 +28,30 @@ https://github.com/seti9585/sd-webui-FreSca
 | --------- | ------- | ----------- |
 | Low-freq Scale (l)  | 1.00 | Multiplier for low-frequency components (global structure, composition) |
 | High-freq Scale (h) | 1.25 | Multiplier for high-frequency components (detail, edges, texture) |
-| Freq Cutoff         | 20   | Radius from DC (centre of shifted spectrum) dividing the two bands. ComfyUI default = 20 |
+| Cutoff Mode         | Fixed radius | `Fixed radius`: constant FFT-index radius, shared across the whole batch and all channels. `Energy-based (adaptive)`: radius solved independently per sample and per channel so cumulative power-spectrum energy reaches the target ratio (`r0`) |
+| Freq Cutoff         | 20   | Radius from DC (centre of shifted spectrum) dividing the two bands. ComfyUI default = 20. **Fixed radius mode only** |
+| Energy Ratio (r0)   | 0.90 | Target cumulative power-spectrum energy ratio defining the low/high boundary. Matches the paper's Text-to-Image energy-based cutoff configuration (Section 4.1, arXiv:2504.02154). **Energy-based (adaptive) mode only** |
 
 Raising `h` above 1.0 sharpens detail and texture without affecting overall composition.  
 Raising `l` above 1.0 strengthens global structure and prompt adherence.  
 Both can be tuned independently; setting either to 1.0 leaves that band unchanged.
+
+---
+
+## Cutoff Modes
+
+**Fixed radius** (default) uses a constant FFT-index radius, identical for every sample in the batch and every channel. This is the paper's spatial-ratio style cutoff.
+
+**Energy-based (adaptive)** solves the radius independently per sample AND per channel, so that the cumulative power-spectrum energy within that radius reaches a target ratio `r0`. This is the paper's energy-based cutoff (Section 4.1 / Fig. 8–9 in arXiv:2504.02154). Per-channel independence is intentional: it keeps the cutoff architecture-agnostic, since no single radius, and no single radius shared across channels, is assumed to be meaningful across different latent spaces (SDXL's VAE latent vs. Anima's flow-matching latent).
+
+```
+F           = fftshift( fft2(delta) )                     # (B, C, H, W) complex
+power       = |F|²
+radius[b,c] = min r such that Σ_{|freq| ≤ r} power[b,c] ≥ r0 × Σ power[b,c]
+low_mask    = (radius_from_DC ≤ radius[b,c])              # per-sample, per-channel
+```
+
+The distance-from-DC map and its radial bin index only depend on (H, W, device), so both are cached and reused across every sampling step; only the per-step energy accumulation is recomputed. The rest of the reconstruction (`scale_map`, `delta_scaled`, `output`) is identical to the Fixed radius path — only the mask now varies per sample and per channel instead of being shared.
 
 ---
 
@@ -70,6 +89,8 @@ When stacking multiple CFG-axis extensions, keep CFG in the 7–15 range to avoi
 FreSca works at the post-CFG tensor level and is architecture-agnostic.  
 However, Anima is typically run at CFG = 1.0, which triggers the fast-path (`return denoised` unchanged) and makes FreSca a no-op in practice.  
 FreSca becomes active on Anima only when CFG is set above 1.0.
+
+When active, the Energy-based (adaptive) cutoff mode is the one intended for Anima: it solves the low/high boundary independently per channel rather than assuming a fixed radius meaningful across architectures, since SDXL's VAE latent and Anima's flow-matching latent are not assumed to share frequency characteristics per channel.
 
 ---
 
@@ -127,11 +148,30 @@ https://github.com/seti9585/sd-webui-FreSca
 | --- | --- | --- |
 | Low-freq Scale (l)  | 1.00 | 低周波成分（グローバル構造・構図）の乗数 |
 | High-freq Scale (h) | 1.25 | 高周波成分（ディテール・エッジ・テクスチャ）の乗数 |
-| Freq Cutoff         | 20   | 低帯と高帯を分ける DC からの半径。ComfyUI 既定値 = 20 |
+| Cutoff Mode         | Fixed radius | `Fixed radius`：固定のFFTインデックス半径。バッチ全体・全チャンネルで共通。`Energy-based (adaptive)`：サンプルごと・チャンネルごとに独立して半径を解き、累積パワースペクトラムエネルギーが目標比率（`r0`）に達する半径を用いる |
+| Freq Cutoff         | 20   | 低帯と高帯を分ける DC からの半径。ComfyUI 既定値 = 20。**Fixed radius モード専用** |
+| Energy Ratio (r0)   | 0.90 | 低帯・高帯の境界を定める目標累積エネルギー比率。原論文（arXiv:2504.02154, Section 4.1）のText-to-Image向けenergy-basedカットオフ設定と同じ値。**Energy-based (adaptive) モード専用** |
 
 `h` を 1.0 より大きくするとディテールとテクスチャが鮮明になり、構図には影響しません。  
 `l` を 1.0 より大きくするとグローバル構造やプロンプト追従性が強まります。  
 どちらか一方を 1.0 にすればその帯は変化なし、両立調整が可能です。
+
+---
+
+## カットオフモード
+
+**Fixed radius**（既定）は固定のFFTインデックス半径を使い、バッチ内の全サンプル・全チャンネルで同一です。原論文のspatial-ratio方式のカットオフに相当します。
+
+**Energy-based (adaptive)** は、半径をサンプルごと・チャンネルごとに独立して解き、その半径内の累積パワースペクトラムエネルギーが目標比率`r0`に達するようにします。原論文のenergy-basedカットオフ（arXiv:2504.02154, Section 4.1 / Fig. 8–9）に相当します。チャンネルを集約せず独立させているのは意図的な設計です。SDXLのVAE潜在空間とAnimaのflow-matching潜在空間で、チャンネルごとの周波数特性が同じとは限らないため、単一の固定半径、あるいはチャンネル間で共有される単一半径を前提にしない設計にしています。
+
+```
+F           = fftshift( fft2(delta) )                     # (B, C, H, W) complex
+power       = |F|²
+radius[b,c] = min r such that Σ_{|freq| ≤ r} power[b,c] ≥ r0 × Σ power[b,c]
+low_mask    = (radius_from_DC ≤ radius[b,c])              # サンプルごと・チャンネルごと
+```
+
+DCからの距離マップとその半径ビンインデックスは(H, W, device)にのみ依存するため、キャッシュして毎ステップ使い回します。毎ステップ再計算するのはエネルギー集計部分のみです。再構築部分（`scale_map`、`delta_scaled`、`output`）はFixed radiusモードと同一で、マスクがサンプル・チャンネルごとに変わる点だけが異なります。
 
 ---
 
@@ -168,6 +208,8 @@ TCFG と FreSca は干渉しません。TCFG は CFG 演算前にガイダンス
 FreSca は Post-CFG テンソルレベルで動作しアーキテクチャに依存しません。  
 ただし Anima は通常 CFG = 1.0 で運用するため、fast-path（`denoised` をそのまま返す）が発動し、実質的に無効になります。  
 CFG を 1.0 より大きく設定した場合に限り FreSca が有効になります。
+
+有効な場合、Animaで想定しているのは Energy-based (adaptive) モードです。低帯・高帯の境界をチャンネルごとに独立して解くため、アーキテクチャ間で意味を持つ単一の固定半径を仮定しません。SDXLのVAE潜在空間とAnimaのflow-matching潜在空間で、チャンネルごとの周波数特性が同じとは限らないためです。
 
 ---
 
