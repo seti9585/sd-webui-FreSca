@@ -9,7 +9,7 @@ import gradio as gr
 import modules.scripts as scripts
 
 from sd_webui_fresca.core import (
-    FRESCA_HOOK_QUALNAME,
+    MARKER,
     apply_fresca,
     remove_fresca_patches,
 )
@@ -177,7 +177,7 @@ class FreScaScript(scripts.Script):
                 r0=_r0,
             )
 
-        fresca_hook.__qualname__ = FRESCA_HOOK_QUALNAME
+        fresca_hook._sd_webui_fresca_marker = MARKER
 
         unet = p.sd_model.forge_objects.unet.clone()
         remove_fresca_patches(unet)
