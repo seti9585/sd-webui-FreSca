@@ -41,9 +41,11 @@ from __future__ import annotations
 import torch
 
 
-# Qualname tag used to identify this extension's own post-CFG hook so it can be
-# removed before re-registration (idempotency / fail-safe against double-apply).
-FRESCA_HOOK_QUALNAME = "fresca_hook"
+# Marker attribute value used to identify this extension's own post-CFG hook
+# so it can be removed before re-registration (idempotency / fail-safe against
+# double-apply). Versioned string, following the same convention as
+# sd-webui-SkimmedCFG / sd-webui-TCFG / sd-webui-MaHiRo / sd-webui-DifferenceCFG.
+MARKER = "sd_webui_fresca_v1"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -56,13 +58,13 @@ def remove_fresca_patches(unet) -> None:
     reForge / Forge store post-CFG functions in
     ``unet.model_options["sampler_post_cfg_function"]`` (a list). Re-running
     ``process`` (re-enable, parameter change, repeated batches) would otherwise
-    append a second ``fresca_hook`` and apply FreSca twice — over-scaling the
-    guidance delta. Calling this before registration keeps the operation
-    idempotent: at most one FreSca hook is ever present.
+    append a second hook and apply FreSca twice — over-scaling the guidance
+    delta. Calling this before registration keeps the operation idempotent:
+    at most one FreSca hook is ever present.
 
-    Only hooks whose ``__qualname__`` equals :data:`FRESCA_HOOK_QUALNAME` are
-    removed, so other extensions' post-CFG functions (e.g. MaHiRo) are left
-    untouched.
+    Only hooks whose ``_sd_webui_fresca_marker`` attribute equals
+    :data:`MARKER` are removed, so other extensions' post-CFG functions
+    (e.g. MaHiRo) are left untouched.
     """
     opts = getattr(unet, "model_options", None)
     if not isinstance(opts, dict):
@@ -72,7 +74,7 @@ def remove_fresca_patches(unet) -> None:
         return
     opts["sampler_post_cfg_function"] = [
         fn for fn in fns
-        if getattr(fn, "__qualname__", None) != FRESCA_HOOK_QUALNAME
+        if getattr(fn, "_sd_webui_fresca_marker", None) != MARKER
     ]
 
 
