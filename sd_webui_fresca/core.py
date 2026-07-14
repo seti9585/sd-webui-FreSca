@@ -38,7 +38,33 @@ Cutoff modes
 
 from __future__ import annotations
 
+import logging
+import sys
+
 import torch
+
+logger = logging.getLogger(__name__)
+
+
+def _emit(fmt, *args):
+    """Emit a diagnostic line via BOTH the logger and a stderr print, so it
+    shows regardless of a backend's logging configuration (reForge surfaces
+    module warnings; some forks, e.g. Forge Neo, may not)."""
+    try:
+        msg = (fmt % args) if args else fmt
+    except Exception:
+        msg = str(fmt)
+    logger.log(logging.WARNING, msg)
+    try:
+        print(msg, file=sys.stderr, flush=True)
+    except Exception:
+        pass
+
+
+# One-shot latch so the fail-safe warning is emitted only once per process,
+# not once per sampling step (a persistent failure would otherwise flood the
+# console with identical lines).
+_WARNED_HOOK_FAIL = False
 
 
 # Marker attribute value used to identify this extension's own post-CFG hook
@@ -195,31 +221,47 @@ def _freq_scale_2d_adaptive(
     """
     orig_dtype = x.dtype
     xf = x.float()
-    B, C, H, W = xf.shape
 
-    F = torch.fft.fftshift(torch.fft.fft2(xf))              # (B, C, H, W) complex64
+    # The last two axes are the spatial (H, W) plane the 2-D FFT operates on;
+    # everything before them is treated as an independent "unit" over which a
+    # radius is solved separately. This keeps the function rank-agnostic:
+    # SDXL hands back (B, C, H, W) so lead = (B, C), while Anima (NextDiT) hands
+    # back (B, C, T, H, W) with a singleton frame axis so lead = (B, C, T). The
+    # fixed-radius path already works on any rank because it only reads
+    # shape[-2:]; matching that here fixes the "too many values to unpack"
+    # crash that a hard B, C, H, W = xf.shape produced on Anima's 5-D latent.
+    *lead, H, W = xf.shape
+    N = 1
+    for d in lead:
+        N *= d                                    # number of independent units
+
+    F = torch.fft.fftshift(torch.fft.fft2(xf))    # (*lead, H, W) complex64
 
     dist    = _get_dist_map(H, W, xf.device)                  # (H, W)
     bin_idx = _get_bin_index(H, W, xf.device)                 # (H*W,) long
 
-    # ── Power spectrum, radially binned per (sample, channel) ─────────────
-    power = (F.real ** 2 + F.imag ** 2).reshape(B * C, H * W)   # (B*C, H*W)
+    # ── Power spectrum, radially binned per independent unit ──────────────
+    power = (F.real ** 2 + F.imag ** 2).reshape(N, H * W)       # (N, H*W)
     n_bins = int(bin_idx.max().item()) + 1
     energy_per_bin = torch.zeros(
-        B * C, n_bins, device=xf.device, dtype=power.dtype
+        N, n_bins, device=xf.device, dtype=power.dtype
     )
-    energy_per_bin.scatter_add_(1, bin_idx.unsqueeze(0).expand(B * C, -1), power)
+    energy_per_bin.scatter_add_(1, bin_idx.unsqueeze(0).expand(N, -1), power)
 
     # ── Smallest radius whose cumulative energy reaches r0 of the total ───
-    cum_energy = energy_per_bin.cumsum(dim=1)                  # (B*C, n_bins)
+    cum_energy = energy_per_bin.cumsum(dim=1)                  # (N, n_bins)
     target     = float(r0) * cum_energy[:, -1:]
     radius_idx = torch.searchsorted(cum_energy, target).squeeze(1)
-    radius     = radius_idx.clamp(max=n_bins - 1).float().view(B, C)  # (B, C)
+    radius     = radius_idx.clamp(max=n_bins - 1).float().view(*lead)  # (*lead,)
 
-    # ── Per-(sample, channel) circular mask ────────────────────────────────
-    low_mask  = (dist[None, None, :, :] <= radius[:, :, None, None]).to(F.real.dtype)
+    # ── Per-unit circular mask ─────────────────────────────────────────────
+    # Add the two trailing spatial axes to radius so it broadcasts against the
+    # (H, W) distance map; dist gets matching leading singleton axes.
+    dist_b   = dist.reshape((1,) * len(lead) + (H, W))         # (1.., H, W)
+    radius_b = radius.reshape(tuple(lead) + (1, 1))            # (*lead, 1, 1)
+    low_mask  = (dist_b <= radius_b).to(F.real.dtype)          # (*lead, H, W)
     high_mask = 1.0 - low_mask
-    scale_map = scale_low * low_mask + scale_high * high_mask   # (B, C, H, W)
+    scale_map = scale_low * low_mask + scale_high * high_mask  # (*lead, H, W)
     F_scaled  = F * scale_map
 
     return torch.fft.ifft2(torch.fft.ifftshift(F_scaled)).real.to(orig_dtype)
@@ -257,29 +299,47 @@ def apply_fresca(
         freq_cutoff : Only used when cutoff_mode == "fixed".
         r0          : Only used when cutoff_mode == "energy".
 
+    Fail-safe: if anything inside raises (an unexpected latent rank, a missing
+    key, a device/dtype edge case, ...), the standard CFG output
+    (``args["denoised"]``) is returned unmodified so the generation completes
+    instead of crashing. The failure is reported once per process via _emit
+    (logger + stderr), matching the convention used by sd-webui-CFGZeroStar.
+
     Returns:
-        Modified denoised tensor.
+        Modified denoised tensor (or the unmodified standard CFG output on the
+        fast-path no-ops and on internal failure).
     """
-    cond_d    = args["cond_denoised"]    # (B, C, H, W)
-    uncond_d  = args["uncond_denoised"]  # (B, C, H, W)
-    cfg_scale = args["cond_scale"]       # float
+    global _WARNED_HOOK_FAIL
 
     # ── Fast-path: no guidance, or scaling is trivially identity ──────────
-    if cfg_scale == 1.0:
+    # Read cond_scale defensively; the fast-paths must never be the thing that
+    # throws, since they are the cheap "nothing to do" exits.
+    if args.get("cond_scale") == 1.0:
         return args["denoised"]
     if scale_low == 1.0 and scale_high == 1.0:
         return args["denoised"]
 
-    # ── Guidance delta in denoised space ──────────────────────────────────
-    #   Δ = cond_d − uncond_d  (sign-equivalent to −σ · Δε_t; same frequency
-    #   content as the noise-space delta the paper operates on.)
-    delta = cond_d - uncond_d  # (B, C, H, W)
+    try:
+        cond_d    = args["cond_denoised"]    # (B, C, H, W) or higher rank
+        uncond_d  = args["uncond_denoised"]  # same shape as cond_d
+        cfg_scale = args["cond_scale"]       # float
 
-    # ── Frequency-aware rescaling ─────────────────────────────────────────
-    if cutoff_mode == "energy":
-        delta_scaled = _freq_scale_2d_adaptive(delta, scale_low, scale_high, r0)
-    else:
-        delta_scaled = _freq_scale_2d(delta, scale_low, scale_high, freq_cutoff)
+        # ── Guidance delta in denoised space ──────────────────────────────
+        #   Δ = cond_d − uncond_d  (sign-equivalent to −σ · Δε_t; same
+        #   frequency content as the noise-space delta the paper operates on.)
+        delta = cond_d - uncond_d
 
-    # ── Reconstruct denoised output ───────────────────────────────────────
-    return uncond_d + cfg_scale * delta_scaled
+        # ── Frequency-aware rescaling ─────────────────────────────────────
+        if cutoff_mode == "energy":
+            delta_scaled = _freq_scale_2d_adaptive(delta, scale_low, scale_high, r0)
+        else:
+            delta_scaled = _freq_scale_2d(delta, scale_low, scale_high, freq_cutoff)
+
+        # ── Reconstruct denoised output ───────────────────────────────────
+        return uncond_d + cfg_scale * delta_scaled
+
+    except Exception as exc:
+        if not _WARNED_HOOK_FAIL:
+            _emit("[FreSca] hook skipped (returning standard CFG): %r", exc)
+            _WARNED_HOOK_FAIL = True
+        return args["denoised"]
